@@ -1,0 +1,26 @@
+{
+  "version": "v2.0.0-kit.1",
+  "sdkVersion": "2.0.0",
+  "language": "pascal",
+  "portable": false,
+  "engine": {
+    "file": "clunkyard-engine-v2.0.0-kit.1.tar.gz",
+    "url": "https://github.com/clunkyard/game-kit/releases/download/v2.0.0-kit.1/clunkyard-engine-v2.0.0-kit.1.tar.gz",
+    "bytes": 7071301,
+    "sha256": "0b9cfa6958a952c32388602821ec4275e61400255f91b212f9c2a9220f8a0d86",
+    "expandedBytes": 33794538
+  },
+  "sdk": {
+    "file": "clunkyard-sdk-pascal-linux-x64-v2.0.0-kit.1.tar.gz",
+    "url": "https://github.com/clunkyard/game-kit/releases/download/v2.0.0-kit.1/clunkyard-sdk-pascal-linux-x64-v2.0.0-kit.1.tar.gz",
+    "bytes": 7783524,
+    "sha256": "385967f3504a428ff25700d9861eee449182ec3b47350cd32ee322a354f84e33",
+    "expandedBytes": 53876138
+  },
+  "rebuildBindings": [],
+  "tools": [
+    "node",
+    "make",
+    "fpc"
+  ]
+}
