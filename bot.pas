@@ -59,6 +59,14 @@ begin Code:=cy_drive_throttle(Handle,Throttle);Code:=cy_drive_turn(Handle,Turnin
 procedure Scan(Handle:TCyRobot;Heading,Arc,Pitch:Double);
 var Code:LongInt;
 begin Code:=cy_scanner_heading(Handle,Heading);Code:=cy_scanner_arc(Handle,Arc);Code:=cy_scanner_pitch(Handle,Pitch);end;
+{ The arena's calibration kernel, xorshift-sqrt v1; safe to delete. }
+function CalibrationWork(Work,Tick:QWord):Double;
+var X,I:QWord;Sum:Double;
+begin
+  X:=QWord(88172645463325252) xor Tick;Sum:=0;I:=0;
+  while I<Work do begin X:=X xor (X shl 13);X:=X xor (X shr 7);X:=X xor (X shl 17);Sum:=Sum+Sqrt(Double(X shr 11));Inc(I);end;
+  Result:=Double((QWord(Floor(Sum))+(X shr 40)) mod 1000000);
+end;
 procedure Turn(Handle:TCyRobot);
 var Position,Gravity:TCyVec3;Target:TCyContact;Cue:TCyCue;Last:TCyScan;Aim:TCySolution;Now:TCyDirection;
     Storm:TCyStorm;Zone:TCyZone;Code,Tick,Is3d,CanFire:LongInt;FreeFlight:Boolean;
@@ -96,6 +104,10 @@ begin
     Code:=cy_angles_bearing_to(Position,Zone.Center,Bearing);Climb:=0;if Zone.Shape=CY_SHAPE_SPHERE then Code:=cy_angles_elevation_to(Position,Zone.Center,Climb);
     Code:=cy_angles_angle_diff(Bearing,Heading,Delta);Code:=cy_angles_clamp(Delta/30,-1,1,Turning);
     Code:=cy_angles_clamp((Climb-Pitch)/30,-1,1,Pitching);Drive(Handle,0.8,Turning,Pitching);
+  end;
+  { Only the arena's rate calibration sends this; safe to delete. }
+  if cy_raw_number(Handle,'state.calibration.work',22,Work)=CY_OK then if Work>=1 then begin
+    Code:=cy_status_text(Handle,'WORK',4);Code:=cy_status_value(Handle,CalibrationWork(QWord(Work),QWord(Tick)));
   end;
 end;
 begin
