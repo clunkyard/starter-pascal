@@ -48,8 +48,19 @@ program Bot;
 {$mode objfpc}{$H+}
 uses Clunkyard, Math;
 type TQuery=function(Robot:TCyRobot;out Value:Double):LongInt;cdecl;
+const
+  { Bearing is earned: a scan contact's bearing is off by up to its bearing_error
+    (degrees, a fixed share of the arc), so a wide beam finds a robot and a narrow one
+    aims at it. Contacts within 120 units are exact. }
+  SEARCH_ARC=40;  { degrees: sweeps the circle in half a second }
+  HOLD_WIDTH=60;  { units across at the target: it stays in the beam from tick to tick }
+  MIN_ARC=6;      { degrees: the narrowest the beam holds }
+  WINDOW=12;      { ticks of sightings the aim averages }
+  SIGHTINGS=8;    { narrow sightings in the window before a shot }
+  LOOK_EVERY=40;  { ticks between looks around the target, for a nearer robot }
+  REACQUIRE=10;   { ticks to look again where a lost target was }
 var Robot:TCyRobot;Status,Event:LongInt;
-    DodgeTicks:LongInt=0;Dodges:LongInt=0;
+    DodgeTicks:LongInt=0;Dodges:LongInt=0;Slot:LongInt=0;
 function Get(Handle:TCyRobot;Read:TQuery):Double;
 var Code:LongInt;
 begin Result:=0;Code:=Read(Handle,Result);end;
@@ -62,9 +73,36 @@ begin Code:=cy_drive_throttle(Handle,Throttle);Code:=cy_drive_turn(Handle,Turnin
 procedure Scan(Handle:TCyRobot;Heading,Arc,Pitch:Double);
 var Code:LongInt;
 begin Code:=cy_scanner_heading(Handle,Heading);Code:=cy_scanner_arc(Handle,Arc);Code:=cy_scanner_pitch(Handle,Pitch);end;
+function Coord(const V:TCyVec3;Axis:LongInt):Double;
+begin case Axis of 0:Result:=V.X;1:Result:=V.Y;else Result:=V.Z;end;end;
+{ A straight line through the narrowest of the last WINDOW ticks' sightings: where
+  the robot is now and how fast it moves. Each sighting is off by its bearing_error;
+  the line averages that out. }
+function Fit(Handle:TCyRobot;Target,Tick:LongInt;out Where,Speed:TCyVec3;out Count:LongInt):Boolean;
+var History:array[0..31] of TCySighting;Seen:array[0..31] of LongInt;Total:LongWord;
+    I,Axis,Rate,Code:LongInt;Best,T0,Spread,Mean,Slope,Value:Double;Line:array[0..2] of Double;Rates:array[0..2] of Double;
+begin
+  Result:=False;Count:=0;Where.X:=0;Where.Y:=0;Where.Z:=0;Speed:=Where;
+  if cy_tracker_history(Handle,Target,History[0],32,Total)<>CY_OK then Exit;
+  Best:=1e30;
+  for I:=0 to Total-1 do if History[I].Tick>Tick-WINDOW then if History[I].Bearing_error<Best then Best:=History[I].Bearing_error;
+  for I:=0 to Total-1 do if (History[I].Tick>Tick-WINDOW) and (History[I].Bearing_error<=1.5*Best) then begin Seen[Count]:=I;Inc(Count);end;
+  if Count<2 then Exit;
+  Code:=cy_match_tick_rate(Handle,Rate);T0:=0;
+  for I:=0 to Count-1 do T0:=T0+History[Seen[I]].Tick;
+  T0:=T0/Count;Spread:=0;
+  for I:=0 to Count-1 do Spread:=Spread+Sqr(History[Seen[I]].Tick-T0);
+  for Axis:=0 to 2 do begin
+    Mean:=0;for I:=0 to Count-1 do Mean:=Mean+Coord(History[Seen[I]].Position,Axis);Mean:=Mean/Count;
+    Slope:=0;for I:=0 to Count-1 do Slope:=Slope+(History[Seen[I]].Tick-T0)*(Coord(History[Seen[I]].Position,Axis)-Mean);
+    Slope:=Slope/Spread;Line[Axis]:=Mean+Slope*(Tick-T0);Rates[Axis]:=Slope*Rate;
+  end;
+  Where.X:=Line[0];Where.Y:=Line[1];Where.Z:=Line[2];Speed.X:=Rates[0];Speed.Y:=Rates[1];Speed.Z:=Rates[2];
+  Result:=True;
+end;
 procedure Turn(Handle:TCyRobot);
 var Position,Gravity:TCyVec3;Target:TCyContact;Cue:TCyCue;Last:TCyScan;Aim:TCySolution;Now:TCyDirection;
-    Storm:TCyStorm;Zone:TCyZone;Code,Tick,Is3d,CanFire:LongInt;FreeFlight:Boolean;
+    Storm:TCyStorm;Zone:TCyZone;Code,Tick,Is3d,CanFire,Seen,Count2:LongInt;Ready:Boolean;Where,Speed:TCyVec3;Hold:Double;FreeFlight:Boolean;
     Heading,Pitch,Throttle,Power,Delta,Bearing,Distance,Elevation,Error,Across,Up,Arc,Sweep,Margin,Away,Control,Climb,Turning,Pitching,Work:Double;
     Cues:array[0..31] of TCyContact;Count,I:LongWord;Fired,Left:Boolean;ControlMode:LongInt;
 begin
@@ -73,15 +111,35 @@ begin
   Code:=cy_clock_tick(Handle,Tick);Code:=cy_match_is_3d(Handle,Is3d);FreeFlight:=(Is3d<>0) and (Gravity.Z=0);
   Code:=cy_drive_brake(Handle,0.2);
   if cy_sensors_nearest(Handle,Target)=CY_OK then begin
+    Slot:=Target.Slot;
     Throttle:=0.2;if Target.Range>350 then Throttle:=0.7 else if Target.Range<200 then Throttle:=-0.4;
-    Drive(Handle,Throttle,Steer(Target.Bearing,Heading),Steer(Target.Elevation,Pitch));Scan(Handle,Target.Bearing,20,Target.Elevation);
-    { cy_gun_lead is the intercept if the target holds course. }
+    Drive(Handle,Throttle,Steer(Target.Bearing,Heading),Steer(Target.Elevation,Pitch));
+    { Halve the beam each tick until it is HOLD_WIDTH across at the target: narrow enough for a precise bearing, wide enough to keep it in. }
+    Hold:=Max(MIN_ARC,2*ArcTan2(HOLD_WIDTH/2,Target.Range)*180/Pi);
+    { In a crowd a narrow beam sees one robot: every LOOK_EVERY ticks widen it for a tick. }
+    if Tick mod LOOK_EVERY=0 then Arc:=SEARCH_ARC else Arc:=Max(Hold,Min(SEARCH_ARC,Last.Arc/2));
+    Scan(Handle,Target.Bearing,Arc,Target.Elevation);
     Code:=cy_gun_power_for_flight_time(Handle,Target.Range,1,Power);
-    if cy_gun_lead(Handle,Target,Power,Aim)<>CY_OK then begin Aim.Heading:=Target.Bearing;Aim.Pitch:=Target.Elevation;end;
+    { An exact contact: cy_gun_lead is the intercept if the target holds course.
+      A noisy one: lead the fitted line, and fire only once it rests on enough sightings. }
+    Ready:=True;
+    if Target.Bearing_error>0 then begin
+      if Fit(Handle,Slot,Tick,Where,Speed,Count2) then Code:=cy_gun_lead_point(Handle,Where,Speed,Power,Aim)
+      else Code:=CY_E_INTERNAL; { no fit: aim at the bearing }
+      Ready:=(Code=CY_OK) and (Count2>=SIGHTINGS);
+    end else Code:=cy_gun_lead(Handle,Target,Power,Aim);
+    if Code<>CY_OK then begin Aim.Heading:=Target.Bearing;Aim.Pitch:=Target.Elevation;end;
     Code:=cy_gun_aim_heading(Handle,Aim.Heading);Code:=cy_gun_aim_pitch(Handle,Aim.Pitch);
     Code:=cy_gun_aim_now(Handle,Now);Code:=cy_angles_angle_diff(Aim.Heading,Now.Heading,Delta);Code:=cy_gun_can_fire(Handle,Power,10,CanFire);
-    if (Abs(Delta)<3) and (Abs(Aim.Pitch-Now.Pitch)<3) and (CanFire<>0) then begin Code:=cy_gun_fire(Handle);Code:=cy_gun_power(Handle,Power);end;
-    Code:=cy_status_text(Handle,'TRACK',5);Code:=cy_status_value(Handle,Target.Range);
+    if Ready and (Abs(Delta)<3) and (Abs(Aim.Pitch-Now.Pitch)<3) and (CanFire<>0) then begin Code:=cy_gun_fire(Handle);Code:=cy_gun_power(Handle,Power);end;
+    if Ready then Code:=cy_status_text(Handle,'TRACK',5) else Code:=cy_status_text(Handle,'NARROW',6);
+    Code:=cy_status_value(Handle,Target.Range);
+  end else if (Slot<>0) and (cy_tracker_last_seen(Handle,Slot,Seen)=CY_OK) and (Tick-Seen<=REACQUIRE) then begin
+    { Lost it: look again where it was last seen, widening the beam, before searching. }
+    Code:=cy_tracker_position(Handle,Slot,Where);Code:=cy_angles_bearing_to(Position,Where,Bearing);
+    Elevation:=0;if FreeFlight then Code:=cy_angles_elevation_to(Position,Where,Elevation);
+    Drive(Handle,0.5,Steer(Bearing,Heading),Steer(Elevation,Pitch));
+    Scan(Handle,Bearing,Min(SEARCH_ARC,Last.Arc*2),Elevation);Code:=cy_status_text(Handle,'REACQUIRE',9);
   end else if cy_tracker_cue(Handle,Cue)=CY_OK then begin
     Code:=cy_angles_bearing_to(Position,Cue.Position,Bearing);Code:=cy_angles_distance(Position,Cue.Position,Distance);
     Elevation:=0;if FreeFlight then Code:=cy_angles_elevation_to(Position,Cue.Position,Elevation);
