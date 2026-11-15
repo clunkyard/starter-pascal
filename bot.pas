@@ -8,7 +8,8 @@
 (* clock: tick seconds remaining_ticks *)
 (* arena: size gravity terrain_kind ground_height(x y) *)
 (* me: health position velocity heading pitch roll angular_velocity *)
-(*   attitude grounded altitude applied *)
+(*   attitude grounded altitude applied hull_mounts to_mount(heading pitch) *)
+(*   from_mount(heading pitch) mount_toward(point) *)
 (* battery: charge capacity regen sustainable_drive compute *)
 (*   drive_cost(fraction) *)
 (* drive: hover_lift *)
@@ -30,7 +31,8 @@
 (* score: me best armour *)
 (* angles: normalize(degrees) angle_diff(target current) *)
 (*   bearing_to(from to) elevation_to(from to) direction(heading pitch) *)
-(*   distance(a b) clamp(value low high) *)
+(*   distance(a b) to_chassis(heading pitch attitude) *)
+(*   from_chassis(heading pitch attitude) clamp(value low high) *)
 (* raw: number(path) text(path) has(path) flag(path) count(path) line() *)
 (* Controls: drive.set(throttle turn pitch_turn) *)
 (*   drive.forces(thrust strafe lift yaw_torque pitch_torque roll_torque brake) *)
@@ -47,6 +49,7 @@ program Bot;
 uses Clunkyard, Math;
 type TQuery=function(Robot:TCyRobot;out Value:Double):LongInt;cdecl;
 var Robot:TCyRobot;Status,Event:LongInt;
+    DodgeTicks:LongInt=0;Dodges:LongInt=0;
 function Get(Handle:TCyRobot;Read:TQuery):Double;
 var Code:LongInt;
 begin Result:=0;Code:=Read(Handle,Result);end;
@@ -63,6 +66,7 @@ procedure Turn(Handle:TCyRobot);
 var Position,Gravity:TCyVec3;Target:TCyContact;Cue:TCyCue;Last:TCyScan;Aim:TCySolution;Now:TCyDirection;
     Storm:TCyStorm;Zone:TCyZone;Code,Tick,Is3d,CanFire:LongInt;FreeFlight:Boolean;
     Heading,Pitch,Throttle,Power,Delta,Bearing,Distance,Elevation,Error,Across,Up,Arc,Sweep,Margin,Away,Control,Climb,Turning,Pitching,Work:Double;
+    Cues:array[0..31] of TCyContact;Count,I:LongWord;Fired,Left:Boolean;ControlMode:LongInt;
 begin
   Code:=cy_me_position(Handle,Position);Code:=cy_arena_gravity(Handle,Gravity);Code:=cy_scanner_last(Handle,Last);
   Heading:=Get(Handle,@cy_me_heading);Pitch:=Get(Handle,@cy_me_pitch);
@@ -71,6 +75,7 @@ begin
   if cy_sensors_nearest(Handle,Target)=CY_OK then begin
     Throttle:=0.2;if Target.Range>350 then Throttle:=0.7 else if Target.Range<200 then Throttle:=-0.4;
     Drive(Handle,Throttle,Steer(Target.Bearing,Heading),Steer(Target.Elevation,Pitch));Scan(Handle,Target.Bearing,20,Target.Elevation);
+    { cy_gun_lead is the intercept if the target holds course. }
     Code:=cy_gun_power_for_flight_time(Handle,Target.Range,1,Power);
     if cy_gun_lead(Handle,Target,Power,Aim)<>CY_OK then begin Aim.Heading:=Target.Bearing;Aim.Pitch:=Target.Elevation;end;
     Code:=cy_gun_aim_heading(Handle,Aim.Heading);Code:=cy_gun_aim_pitch(Handle,Aim.Pitch);
@@ -86,6 +91,20 @@ begin
   end else begin
     Code:=cy_angles_normalize(Last.Heading+36,Sweep);Up:=0;if FreeFlight then Up:=((Tick div 10) mod 3-1)*35;
     Drive(Handle,0.5,0.33,Steer(0,Pitch));Scan(Handle,Sweep,40,Up);Code:=cy_status_text(Handle,'SEARCH',6);
+  end;
+  { A simple dodge: vary it, or predict the shooter. }
+  Fired:=False;
+  if cy_sensors_cues(Handle,Cues[0],Length(Cues),Count)=CY_OK then
+    for I:=1 to Count do Fired:=Fired or (Cues[I-1].Source=CY_SOURCE_MUZZLE);
+  if (DodgeTicks=0) and Fired then begin Inc(Dodges);DodgeTicks:=10;end;
+  if DodgeTicks>0 then begin
+    { Odd dodges go left, even ones right; turn +1 and strafe -1 go left. }
+    Left:=Dodges mod 2=1;if Left then Work:=1 else Work:=-1;Dec(DodgeTicks);
+    Code:=cy_match_control(Handle,ControlMode);
+    if ControlMode=CY_CONTROL_FORCES then begin Code:=cy_drive_throttle(Handle,0.5);Code:=cy_drive_strafe(Handle,-Work);end
+    else begin Code:=cy_drive_throttle(Handle,1);Code:=cy_drive_turn(Handle,Work);end;
+    if Left then Code:=cy_status_text(Handle,'dodge:left',10) else Code:=cy_status_text(Handle,'dodge:right',11);
+    Code:=cy_status_value(Handle,Dodges);
   end;
   if Get(Handle,@cy_battery_charge)<Get(Handle,@cy_battery_capacity)/4 then Code:=cy_drive_throttle(Handle,Get(Handle,@cy_drive_get_throttle)*0.5);
   if cy_nav_storm(Handle,Storm)=CY_OK then if cy_nav_storm_margin(Handle,Position,Margin)=CY_OK then if Margin>-60 then begin
