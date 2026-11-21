@@ -1,14 +1,14 @@
 { A robot on the Clunkyard core's Free Pascal binding. The core owns
   tracking, geometry and protocol handling; this program chooses tactics.
 }
-(* Clunkyard robot API 2.0.0: one core under every language, the same *)
+(* Clunkyard robot API 2.1.0: one core under every language, the same *)
 (* answers everywhere. Facts (a call shows its arguments): *)
 (* match: mode ruleset control robots is_3d tick_rate max_ticks *)
 (*   robot_id(slot) *)
 (* clock: tick seconds remaining_ticks *)
 (* arena: size gravity terrain_kind ground_height(x y) *)
 (* me: health position velocity heading pitch roll angular_velocity *)
-(*   attitude grounded altitude wall_contact applied hull_mounts *)
+(*   attitude grounded altitude wall_contact hurt applied hull_mounts *)
 (*   to_mount(heading pitch) from_mount(heading pitch) mount_toward(point) *)
 (* battery: charge capacity regen sustainable_drive compute *)
 (*   drive_cost(fraction) *)
@@ -29,6 +29,7 @@
 (*   hill.distance_from(point) wall_margin() pickups nearest_pickup(kind) *)
 (*   field_distance(a b) *)
 (* score: me best armour *)
+(* drone: has ready in_flight launches_left report sightings *)
 (* angles: normalize(degrees) angle_diff(target current) *)
 (*   bearing_to(from to) elevation_to(from to) direction(heading pitch) *)
 (*   distance(a b) to_chassis(heading pitch attitude) *)
@@ -38,7 +39,9 @@
 (*   drive.forces(thrust strafe lift yaw_torque pitch_torque roll_torque brake) *)
 (*   gun.aim(heading pitch) gun.fire(power) scanner.set(heading arc pitch) *)
 (*   scanner.power(on) tracker.configure(smoothing forget_ticks cue_ticks) *)
-(*   status.set(text value) debug.log(line) raw.extra(json) *)
+(*   drone.launch(heading pitch param) drone.brief(index value) *)
+(*   drone.program(language source) status.set(text value) debug.log(line) *)
+(*   raw.extra(json) *)
 (* Every control argument is optional; a second call keeps what the first *)
 (* set. Absent facts are your language's none. Names are snake_case here; *)
 (* your language cases them its own way. Angles are degrees from the +x *)
@@ -176,7 +179,7 @@ begin
   end;
 end;
 begin
-  Status:=cy_open(2,0,'clunkyard-pascal',16,'2.0.0',5,Robot);if Status<0 then Halt(1);
+  Status:=cy_open(2,1,'clunkyard-pascal',16,'2.1.0',5,Robot);if Status<0 then Halt(1);
   repeat
     Status:=cy_session_next(Robot,Event);
     if Status=CY_E_INTERNAL then begin Status:=cy_session_send(Robot);if Status<0 then Break;Continue;end;
